@@ -2,80 +2,126 @@ from pyspark.sql import SparkSession
 from pyspark.ml.feature import VectorAssembler
 from pyspark.ml.regression import LinearRegression
 from pyspark.sql.functions import col
-import os
+from pyspark.ml.evaluation import RegressionEvaluator
 
 def create_spark_session():
     spark = SparkSession.builder \
         .appName("apple-forecasting-model") \
-        .config("spark.sql.catalog.local", "org.apache.iceberg.spark.SparkCatalog") \
-        .config("spark.sql.catalog.local.type", "hadoop") \
-        .config("spark.sql.catalog.local.warehouse", "./spark-warehouse") \
+        .master("local[*]") \
         .getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")
     return spark
 
 def train_forecast_model(spark):
-    """Train a simple linear regression model for demand forecasting"""
+    """Train demand forecasting model"""
     
-    # Load features
-    df = spark.table("local.default.forecast_features")
+    print("\n" + "="*60)
+    print("TRAINING DEMAND FORECASTING MODEL")
+    print("="*60)
+    
+    # Read features
+    df = spark.read.parquet("output/forecast_features")
+    
+    print(f"\nTraining set size: {df.count()} records")
+    df.show(10)
     
     # Prepare features for ML
     assembler = VectorAssembler(
-        inputCols=["prev_day_units", "avg_sentiment"],
+        inputCols=["prev_units", "growth_rate", "sentiment"],
         outputCol="features"
     )
     
-    data = assembler.transform(df)
+    data = assembler.transform(df).select("features", "target")
     
-    # Split data
+    # Split data: 80% train, 20% test
     train, test = data.randomSplit([0.8, 0.2], seed=42)
     
-    # Train model
+    print(f"\nTrain set: {train.count()}, Test set: {test.count()}")
+    
+    # Train linear regression model
     lr = LinearRegression(
         featuresCol="features",
-        labelCol="total_units",
-        maxIter=10,
-        regParam=0.3
+        labelCol="target",
+        maxIter=20,
+        regParam=0.1
     )
     
     model = lr.fit(train)
     
-    # Evaluate
+    # Evaluate model
     predictions = model.transform(test)
     
-    print("=== MODEL PERFORMANCE ===")
-    print(f"RMSE: {model.summary.rootMeanSquaredError:.2f}")
-    print(f"R-squared: {model.summary.r2:.4f}")
-    print(f"Coefficients: {model.coefficients}")
+    evaluator = RegressionEvaluator(
+        predictionCol="prediction",
+        labelCol="target",
+        metricName="rmse"
+    )
     
-    # Show predictions
-    print("\nSample Predictions:")
-    predictions.select("product", "total_units", "prediction").show(10)
+    rmse = evaluator.evaluate(predictions)
     
-    return model
+    r2_evaluator = RegressionEvaluator(
+        predictionCol="prediction",
+        labelCol="target",
+        metricName="r2"
+    )
+    
+    r2 = r2_evaluator.evaluate(predictions)
+    
+    print("\n" + "="*60)
+    print("MODEL PERFORMANCE")
+    print("="*60)
+    print(f"RMSE (Root Mean Squared Error): {rmse:.2f} units")
+    print(f"R² (Coefficient of Determination): {r2:.4f}")
+    print(f"Model Coefficients: {model.coefficients.toArray()}")
+    print(f"Intercept: {model.intercept:.2f}")
+    
+    print("\nSample Predictions (Actual vs Predicted):")
+    predictions.select("target", "prediction").show(15)
+    
+    return model, predictions
 
-def make_forecast(spark, model):
-    """Generate demand forecast for next 7 days"""
-    import pandas as pd
-    from datetime import datetime, timedelta
+def make_forecast(spark, predictions):
+    """Generate summary forecast statistics"""
     
-    print("\n=== 7-DAY DEMAND FORECAST ===")
+    print("\n" + "="*60)
+    print("FORECAST SUMMARY")
+    print("="*60)
     
-    # Get last day data
-    last_day = spark.table("local.default.forecast_features") \
-        .orderBy(col("date").desc()).limit(1).collect()
+    # Calculate prediction error
+    from pyspark.sql.functions import abs, avg
     
-    if last_day:
-        print(f"Last recorded data: {last_day[0].date}")
-        print(f"Last day units sold: {last_day[0].total_units}")
-        print(f"Sentiment: {last_day[0].avg_sentiment:.2f}")
+    error_df = predictions.withColumn(
+        "error", 
+        abs(col("target") - col("prediction"))
+    ).withColumn(
+        "error_pct",
+        (abs(col("target") - col("prediction")) / col("target") * 100)
+    )
     
-    print("\nForecast generated - in production, this would feed inventory planning")
+    avg_error = error_df.agg(avg("error_pct")).collect()[0][0]
+    
+    print(f"\nAverage Forecast Error: {avg_error:.2f}%")
+    print("\nThis model can now forecast demand for:")
+    print("- Next week product demand")
+    print("- Inventory optimization")
+    print("- Revenue forecasting")
+    print("\nIn production, this would integrate with:")
+    print("- Supply chain planning systems")
+    print("- Inventory management")
+    print("- Financial forecasting")
 
 def main():
     spark = create_spark_session()
-    model = train_forecast_model(spark)
-    make_forecast(spark, model)
+    
+    try:
+        model, predictions = train_forecast_model(spark)
+        make_forecast(spark, predictions)
+        
+        print("\n" + "="*60)
+        print("MODEL TRAINING COMPLETE")
+        print("="*60)
+    except Exception as e:
+        print(f"Error: {e}")
 
 if __name__ == "__main__":
     main()
