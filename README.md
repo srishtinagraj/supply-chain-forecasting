@@ -1,4 +1,3 @@
-cat > README.md << 'EOF'
 # Apple Supply Chain Demand Forecasting
 
 A data engineering project demonstrating demand forecasting for Apple products using Apache Spark, directly relevant to Apple's supply chain optimization challenges.
